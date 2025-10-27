@@ -3,40 +3,44 @@ from datetime import datetime, timedelta
 from itertools import permutations
 import pandas as pd
 import streamlit as st
+import pyperclip
 
-st.set_page_config(page_title="Interview Agenda Builder", layout="centered")
-st.title("📅 Interview Agenda Builder")
+# ---------------------- PAGE CONFIG ----------------------
+st.set_page_config(page_title="Amneal Interview Agenda Builder", layout="wide")
 
-st.write("""
-Upload your Power Automate CSV (15-minute available slots).  
-The app detects all interviewers automatically, lets you set each duration (15, 30, 45, 60 min),  
-and generates sequential interview agendas (earliest AM, latest PM) with no gaps by default.
-""")
+# ---------------------- HEADER ----------------------
+col1, col2 = st.columns([6, 1])
+with col1:
+    st.title("📅 Amneal Interview Agenda Builder")
+    st.markdown("""
+    ### 🧾 Instructions  
+    This tool helps you generate complete interview agendas for candidates.  
 
-# ---------------------------------------------------------------------
-def try_parse_datetime(x: str):
+    **Before using this tool:**
+    1. Run the **Power Automate flow** that generates availability in 15-minute increments for each interviewer.  
+    2. Export the results as a **CSV file** (formatted as: *Interviewer, StartTime, EndTime*).  
+    3. Upload that CSV below.  
+
+    Once uploaded, you can:
+    - Assign interview durations for each interviewer (15, 30, 45, or 60 minutes).  
+    - Generate up to a chosen number of sequential agendas **per day** (no gaps).  
+    - Copy the fully formatted email HTML directly into Outlook with one click.  
+    """)
+with col2:
+    st.image(
+        "https://upload.wikimedia.org/wikipedia/en/thumb/3/3c/Amneal_Pharmaceuticals_logo.svg/512px-Amneal_Pharmaceuticals_logo.svg.png",
+        width=120,
+    )
+
+# ---------------------- FUNCTIONS ----------------------
+def try_parse_datetime(x):
     if pd.isna(x):
         return pd.NaT
     s = str(x).strip()
     dt = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-    if not pd.isna(dt):
-        return dt
-    fmts = [
-        "%m/%d/%Y %I:%M %p",
-        "%B %d, %Y %I:%M %p",
-        "%Y-%m-%d %H:%M:%S",
-        "%m/%d/%Y %H:%M"
-    ]
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f)
-        except Exception:
-            pass
-    return pd.NaT
-
+    return dt
 
 def merge_slots(df):
-    """Combine consecutive 15-minute blocks per interviewer/day."""
     merged = []
     for (person, day), group in df.groupby(["Interviewer", df["StartTime"].dt.date]):
         group = group.sort_values("StartTime")
@@ -51,12 +55,7 @@ def merge_slots(df):
         merged.append((person, start, end))
     return pd.DataFrame(merged, columns=["Interviewer", "StartTime", "EndTime"])
 
-
 def find_agendas(df, durations, allow_gap=0, max_results_per_day=2):
-    """
-    Finds sequential (optionally small-gap) agendas.  
-    Returns earliest-start and latest-end per day, up to the specified limit.
-    """
     df = merge_slots(df)
     results = []
     debug = []
@@ -65,7 +64,6 @@ def find_agendas(df, durations, allow_gap=0, max_results_per_day=2):
         slots = {p.lower(): list(g.itertuples(index=False))
                  for p, g in subset.groupby("Interviewer")}
         names = list(durations.keys())
-
         day_results = []
 
         for order in permutations(names):
@@ -90,7 +88,6 @@ def find_agendas(df, durations, allow_gap=0, max_results_per_day=2):
                     for _, s, e in slots[name]:
                         earliest_start = cur_end
                         latest_start = cur_end + timedelta(minutes=allow_gap)
-
                         if s <= latest_start <= e - timedelta(minutes=dur):
                             start = max(cur_end, s)
                             end = start + timedelta(minutes=dur)
@@ -106,40 +103,33 @@ def find_agendas(df, durations, allow_gap=0, max_results_per_day=2):
                 if valid:
                     day_results.append((day, order, agenda))
 
+        # Select up to N distinct agendas per day
         if day_results:
             sorted_by_start = sorted(day_results, key=lambda x: x[2][0][1])
             sorted_by_end = sorted(day_results, key=lambda x: x[2][-1][2], reverse=True)
-
             chosen = []
-            # Add earliest AM option
+
             if sorted_by_start:
                 chosen.append(sorted_by_start[0])
-            # Add latest PM option if different
-            if sorted_by_end and sorted_by_end[0] not in chosen:
-                chosen.append(sorted_by_end[0])
+            if max_results_per_day > 1:
+                for seq in sorted_by_end:
+                    if seq not in chosen:
+                        chosen.append(seq)
+                    if len(chosen) >= max_results_per_day:
+                        break
 
-            # Fill additional if user requested more
-            if len(day_results) > 2 and max_results_per_day > 2:
-                extra = sorted_by_start[1:max_results_per_day]
-                for opt in extra:
-                    if opt not in chosen:
-                        chosen.append(opt)
-
-            results.extend(chosen[:max_results_per_day])
+            results.extend(chosen)
 
     if not results:
         debug.append("⚠️ No valid sequential agendas found.")
     return results, debug
 
-
-# ---------------------------------------------------------------------
-uploaded = st.file_uploader("Upload CSV", type=["csv"])
+# ---------------------- MAIN UI ----------------------
+uploaded = st.file_uploader("📤 Upload CSV from Power Automate", type=["csv"])
 
 if uploaded:
     df = pd.read_csv(uploaded)
     df.columns = [c.strip() for c in df.columns]
-
-    # Auto-detect expected columns
     interviewer_col = next((c for c in df.columns if "interviewer" in c.lower() or "email" in c.lower()), df.columns[0])
     start_col = next((c for c in df.columns if "start" in c.lower()), df.columns[1])
     end_col = next((c for c in df.columns if "end" in c.lower()), df.columns[2])
@@ -156,7 +146,7 @@ if uploaded:
     df = df.dropna(subset=["StartTime", "EndTime"])
 
     interviewers = sorted(df["Interviewer"].unique())
-    st.subheader("🧍 Set duration for each interviewer")
+    st.subheader("🧍 Set Duration for Each Interviewer")
 
     cols = st.columns(min(4, len(interviewers)))
     duration_options = [15, 30, 45, 60]
@@ -168,7 +158,7 @@ if uploaded:
     st.subheader("⚙️ Scheduling Options")
     allow_gap_toggle = st.checkbox("Allow small gaps between interviews (up to 15 minutes)", value=False)
     allow_gap = 15 if allow_gap_toggle else 0
-    max_results = st.slider("Number of agendas to generate per day", 1, 10, 2)
+    max_results = st.slider("Maximum number of options per day", 1, 10, 2)
 
     if st.button("Generate Interview Agendas", type="primary"):
         agendas, debug = find_agendas(df, durations, allow_gap=allow_gap, max_results_per_day=max_results)
@@ -179,23 +169,40 @@ if uploaded:
                 for d in debug:
                     st.markdown(f"- {d}")
         else:
-            st.success(f"Found {len(agendas)} agenda option(s).")
-            html_blocks = []
-            for idx, (day, order, agenda) in enumerate(agendas, start=1):
-                st.markdown(f"### 📅 {day} — Option {idx}")
-                table = pd.DataFrame(
-                    [(n, s.strftime('%I:%M %p'), e.strftime('%I:%M %p')) for n, s, e in agenda],
-                    columns=["Interviewer", "Start", "End"]
-                )
-                st.table(table)
-                html = f"<h4>{day} — Option {idx}</h4><table border='1'><tr><th>Interviewer</th><th>Start</th><th>End</th></tr>"
-                for n, s, e in agenda:
-                    html += f"<tr><td>{n}</td><td>{s.strftime('%I:%M %p')}</td><td>{e.strftime('%I:%M %p')}</td></tr>"
-                html += "</table>"
-                html_blocks.append(html)
+            st.success(f"Generated {len(agendas)} agenda option(s) across {len(set([a[0] for a in agendas]))} day(s).")
 
-            combined = "<br>".join(html_blocks)
-            st.download_button("⬇️ Download HTML Output", combined, "agendas.html")
-            st.code(combined, language="html")
+            # Combine all agendas into one HTML message
+            full_html = """
+            <div style='font-family:Arial, sans-serif;'>
+                <p>Dear Candidate,</p>
+                <p>We are pleased to share the available interview schedule options below. 
+                Please confirm your preferred option at your earliest convenience.</p>
+            """
+            for idx, (day, order, agenda) in enumerate(agendas, start=1):
+                full_html += f"<h3 style='color:#004aad;'>Option {idx} – {day}</h3>"
+                full_html += "<table style='border-collapse:collapse;width:100%;' border='1'>"
+                full_html += "<tr style='background-color:#f2f2f2;'><th>Interviewer</th><th>Start</th><th>End</th></tr>"
+                for n, s, e in agenda:
+                    full_html += f"<tr><td>{n}</td><td>{s.strftime('%I:%M %p')}</td><td>{e.strftime('%I:%M %p')}</td></tr>"
+                full_html += "</table><br>"
+            full_html += """
+                <p>We look forward to connecting with you.</p>
+                <p>Best regards,<br><strong>Talent Acquisition Team</strong><br>Amneal Pharmaceuticals</p>
+            </div>
+            """
+
+            st.markdown("### 📧 Email Preview (All Options)")
+            st.components.v1.html(full_html, height=500, scrolling=True)
+
+            # ---- Copy-to-clipboard functionality ----
+            st.write("Click below to copy the formatted email to your clipboard:")
+            copy_btn = st.button("📋 Copy HTML to Clipboard")
+            if copy_btn:
+                try:
+                    pyperclip.copy(full_html)
+                    st.success("✅ HTML copied! Open a new Outlook email and press Ctrl+V to paste.")
+                except Exception:
+                    st.warning("⚠️ Clipboard copy not supported in this browser. Please copy manually from the preview above.")
+
 else:
-    st.info("Upload a CSV to begin.")
+    st.info("Please upload a CSV file generated from your Power Automate flow to begin.")
