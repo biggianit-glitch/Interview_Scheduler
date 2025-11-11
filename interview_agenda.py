@@ -1,3 +1,4 @@
+# interview_agenda.py
 import re
 import json
 from urllib.parse import quote
@@ -14,11 +15,10 @@ st.title("📅 Interview Scheduler Tool")
 
 st.markdown("""
 ### Instructions
-Before using this tool:
-1. Generate the interviewer availability CSV using your **Power Automate** flow (15-minute increments).
-2. Upload that CSV below (columns: **Interviewer, StartTime, EndTime**).
-3. For each interviewer, choose their interview duration (15, 30, 45, or 60 minutes).
-4. Choose the **maximum agenda options per day** to generate, then click **Generate Agendas**.
+1) Upload the CSV from Power Automate (columns: **Interviewer, StartTime, EndTime**; 15-minute increments).  
+2) Set each interviewer’s duration (15, 30, 45, 60).  
+3) Click **Generate Agendas**.  
+4) Use **Prepare invitations** beside an option to open Outlook compose windows (one per interview in that option).
 ---
 """)
 
@@ -31,7 +31,7 @@ def is_email(s: str) -> bool:
 def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", location=""):
     """
     Outlook on the web compose deeplink with fields pre-filled.
-    Supply LOCAL (user timezone) datetimes formatted as YYYY-MM-DDTHH:MM:SS (no tz suffix).
+    Provide LOCAL (user timezone) datetimes formatted as YYYY-MM-DDTHH:MM:SS (no tz suffix).
     """
     fmt = "%Y-%m-%dT%H:%M:%S"
     params = {
@@ -51,7 +51,7 @@ def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", l
 def parse_time_series(s):
     return pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
 
-# Sidebar timezone (used for display and for deeplink times)
+# Sidebar timezone (used for display and for compose links)
 with st.sidebar:
     st.header("Timezone")
     tz_label = st.selectbox(
@@ -200,11 +200,10 @@ if uploaded_file:
                     md += f"| {person} | {start_ts.astimezone(USER_TZ).strftime('%I:%M %p')} | {end_ts.astimezone(USER_TZ).strftime('%I:%M %p')} |\n"
                 st.markdown(md)
 
-                # ---- compose links for this option (inside the loop!) ----
+                # Build Outlook compose links for each interviewer in this option
                 compose_links = []
                 skipped = []
                 for person, start_ts, end_ts in agenda:
-                    # Expect Interviewer column is email; skip if not
                     if is_email(person):
                         link = outlook_web_link(
                             to_email=person,
@@ -218,12 +217,12 @@ if uploaded_file:
                     else:
                         skipped.append(person)
 
-                # ---- real HTML button (opens popups reliably) ----
                 urls_json = json.dumps(compose_links)
                 links_html = "".join(
                     [f'<li><a href="{u}" target="_blank" rel="noopener noreferrer">{u}</a></li>' for u in compose_links]
                 ) or "<li>No links</li>"
 
+                # Real HTML button that opens popups from a direct click (reduces blocking)
                 st.components.v1.html(
                     f"""
                     <div style="margin:8px 0 4px 0">
@@ -250,8 +249,9 @@ if uploaded_file:
                                 const w = window.open(u, "_blank");
                                 if (w) opened++;
                                 if (i === urls.length - 1) {{
+                                  // Avoid backticks to prevent Python f-string conflicts
                                   msg.textContent = opened
-                                    ? `Opened ${opened} compose window(s). If some were blocked, allow pop-ups and click again.`
+                                    ? "Opened " + opened + " compose window(s). If some were blocked, allow pop-ups and click again."
                                     : "Pop-ups were blocked. Allow pop-ups for this site or use the links below.";
                                 }}
                               }}, 60 * i);
@@ -267,7 +267,7 @@ if uploaded_file:
                 if skipped:
                     st.caption("⚠️ Skipped (not valid emails): " + ", ".join(skipped))
 
-                # For email preview block (unchanged visual summary)
+                # Email preview block (unchanged visual summary)
                 rows_html = "".join(
                     f"<tr><td>{p}</td><td>{s.astimezone(USER_TZ).strftime('%I:%M %p')}</td><td>{e.astimezone(USER_TZ).strftime('%I:%M %p')}</td></tr>"
                     for p, s, e in agenda
