@@ -4,7 +4,7 @@ import json
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from itertools import permutations
-from datetime import timedelta, datetime, timezone
+from datetime import timedelta, datetime, timezone, time as dtime
 
 import pandas as pd
 import streamlit as st
@@ -29,10 +29,7 @@ def is_email(s: str) -> bool:
     return isinstance(s, str) and EMAIL_RE.match(s) is not None
 
 def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", location=""):
-    """
-    Outlook on the web compose deeplink with fields pre-filled.
-    Provide LOCAL (user timezone) datetimes formatted as YYYY-MM-DDTHH:MM:SS (no tz suffix).
-    """
+    """Outlook web compose deeplink with fields pre-filled (LOCAL datetimes, no tz suffix)."""
     fmt = "%Y-%m-%dT%H:%M:%S"
     params = {
         "path": "/calendar/action/compose",
@@ -51,7 +48,7 @@ def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", l
 def parse_time_series(s):
     return pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
 
-# Sidebar inputs: timezone + candidate/job
+# Sidebar inputs: timezone + candidate/job + lunch toggle
 with st.sidebar:
     st.header("Settings")
     tz_label = st.selectbox(
@@ -63,7 +60,10 @@ with st.sidebar:
 
     st.markdown("---")
     candidate_name = st.text_input("Candidate Name", value="Candidate Name")
-    job_title = st.text_input("Job Title", value="Job Title")
+    job_title      = st.text_input("Job Title", value="Job Title")
+
+    st.markdown("---")
+    avoid_lunch = st.checkbox("Avoid lunch 12–1 (allow end by 12:30 or start at 12:30)", value=True)
 
 uploaded_file = st.file_uploader("Upload CSV from Power Automate", type=["csv"])
 
@@ -174,6 +174,18 @@ if uploaded_file:
             agendas_all.extend(day_results)
         return agendas_all
 
+    # ---------- Lunch filter ----------
+    def agenda_respects_lunch_rule(agenda):
+        """If avoid_lunch is on, keep only agendas that end <= 12:30 or start >= 12:30 local."""
+        if not avoid_lunch:
+            return True
+        # Determine the agenda's day (use first slot start)
+        first_local = agenda[0][1].astimezone(USER_TZ)
+        last_local  = agenda[-1][2].astimezone(USER_TZ)
+        lunch_1230  = datetime.combine(first_local.date(), dtime(12, 30), tzinfo=USER_TZ)
+        # Allowed if everything ends by 12:30, or everything starts at/after 12:30
+        return (last_local <= lunch_1230) or (first_local >= lunch_1230)
+
     # ---------- Generate ----------
     if st.button("Generate Agendas"):
         if not interviewers:
@@ -181,17 +193,21 @@ if uploaded_file:
             st.stop()
 
         agendas = find_all_days(df, durations, max_per_day)
+        # apply lunch rule if needed
+        agendas = [a for a in agendas if agenda_respects_lunch_rule(a)]
 
         if not agendas:
-            st.error("No valid sequential agendas found. Make sure your CSV has 15-minute rows for each free slice per interviewer.")
+            msg = "No valid sequential agendas found."
+            if avoid_lunch:
+                msg += " Try turning off the lunch filter or adjust durations."
+            st.error(msg)
         else:
             st.success(f"✅ Found {len(agendas)} possible agendas.")
             html_blocks = []
 
             # Defaults for invites
-            location_default = "Microsoft Teams"  # cannot auto-generate link via deeplink
-            # Subject uses sidebar inputs
-            subject_prefix = f"Interview: {candidate_name} - {job_title}"
+            location_default = "Microsoft Teams"
+            subject_prefix   = f"Interview: {candidate_name} - {job_title}"
 
             # ------- render each option -------
             for idx, agenda in enumerate(agendas, start=1):
@@ -205,7 +221,7 @@ if uploaded_file:
                     md += f"| {person} | {start_ts.astimezone(USER_TZ).strftime('%I:%M %p')} | {end_ts.astimezone(USER_TZ).strftime('%I:%M %p')} |\n"
                 st.markdown(md)
 
-                # Build agenda HTML snippet for the invite body
+                # Agenda HTML for invite body
                 rows_html = "".join(
                     f"<tr><td>{p}</td><td>{s.astimezone(USER_TZ).strftime('%I:%M %p')}</td><td>{e.astimezone(USER_TZ).strftime('%I:%M %p')}</td></tr>"
                     for p, s, e in agenda
@@ -285,7 +301,7 @@ if uploaded_file:
                 if skipped:
                     st.caption("⚠️ Skipped (not valid emails): " + ", ".join(skipped))
 
-                # Email preview block (optional visual summary below)
+                # Optional visual summary below
                 html_blocks.append(
                     f"""
                     <div style="margin:12px 0;">
