@@ -15,9 +15,9 @@ st.title("📅 Interview Scheduler Tool")
 
 st.markdown("""
 ### Instructions
-1) Upload the CSV from Power Automate (columns: **Interviewer, StartTime, EndTime**; 15-minute increments).  
-2) Set each interviewer’s duration (15, 30, 45, 60).  
-3) Enter **Candidate Name** and **Job Title**.  
+1) Upload the CSV from Power Automate (columns: **Interviewer, StartTime, EndTime**; 15-minute increments).
+2) Set each interviewer’s duration (15, 30, 45, 60).
+3) Enter **Candidate Name** and **Job Title**.
 4) Click **Generate Agendas**, then use **Prepare invitations** beside an option.
 ---
 """)
@@ -179,11 +179,9 @@ if uploaded_file:
         """If avoid_lunch is on, keep only agendas that end <= 12:30 or start >= 12:30 local."""
         if not avoid_lunch:
             return True
-        # Determine the agenda's day (use first slot start)
         first_local = agenda[0][1].astimezone(USER_TZ)
         last_local  = agenda[-1][2].astimezone(USER_TZ)
         lunch_1230  = datetime.combine(first_local.date(), dtime(12, 30), tzinfo=USER_TZ)
-        # Allowed if everything ends by 12:30, or everything starts at/after 12:30
         return (last_local <= lunch_1230) or (first_local >= lunch_1230)
 
     # ---------- Generate ----------
@@ -193,7 +191,6 @@ if uploaded_file:
             st.stop()
 
         agendas = find_all_days(df, durations, max_per_day)
-        # apply lunch rule if needed
         agendas = [a for a in agendas if agenda_respects_lunch_rule(a)]
 
         if not agendas:
@@ -203,9 +200,7 @@ if uploaded_file:
             st.error(msg)
         else:
             st.success(f"✅ Found {len(agendas)} possible agendas.")
-            html_blocks = []
 
-            # Defaults for invites
             location_default = "Microsoft Teams"
             subject_prefix   = f"Interview: {candidate_name} - {job_title}"
 
@@ -215,7 +210,7 @@ if uploaded_file:
                 date_str = agenda[0][1].astimezone(USER_TZ).strftime("%A, %B %d, %Y")
                 st.markdown(f"### Option {idx} — {date_str}")
 
-                # Markdown table (visible)
+                # Visible table
                 md = "| Interviewer | Start | End |\n|---|---:|---:|\n"
                 for person, start_ts, end_ts in agenda:
                     md += f"| {person} | {start_ts.astimezone(USER_TZ).strftime('%I:%M %p')} | {end_ts.astimezone(USER_TZ).strftime('%I:%M %p')} |\n"
@@ -235,7 +230,7 @@ if uploaded_file:
                     "<p>(If using Outlook desktop, click the <b>Teams meeting</b> button to add the Teams link.)</p>"
                 )
 
-                # Build Outlook compose links for each interviewer in this option
+                # Compose links for this option
                 compose_links = []
                 skipped = []
                 for person, start_ts, end_ts in agenda:
@@ -257,7 +252,7 @@ if uploaded_file:
                     [f'<li><a href="{u}" target="_blank" rel="noopener noreferrer">{u}</a></li>' for u in compose_links]
                 ) or "<li>No links</li>"
 
-                # Real HTML button that opens popups from a direct click (reduces blocking)
+                # Real HTML button to open drafts
                 st.components.v1.html(
                     f"""
                     <div style="margin:8px 0 4px 0">
@@ -300,21 +295,3 @@ if uploaded_file:
 
                 if skipped:
                     st.caption("⚠️ Skipped (not valid emails): " + ", ".join(skipped))
-
-                # Optional visual summary below
-                html_blocks.append(
-                    f"""
-                    <div style="margin:12px 0;">
-                      <h3 style="margin:0 0 6px 0;">Option {idx} — {date_str}</h3>
-                      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;">
-                        <tr><th>Interviewer</th><th>Start</th><th>End</th></tr>
-                        {rows_html}
-                      </table>
-                    </div>
-                    """
-                )
-
-            # Email preview summary
-            full_html = "".join(html_blocks)
-            st.subheader("📧 Email Preview")
-            st.markdown(full_html, unsafe_allow_html=True)
