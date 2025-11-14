@@ -1,4 +1,4 @@
-# interview_agenda.py
+# interview_agenda.py  (people-only: Interviewer, Name, Title, StartTime, EndTime)
 import re
 import json
 from urllib.parse import quote
@@ -14,14 +14,12 @@ st.set_page_config(page_title="Interview Scheduler", layout="wide")
 st.title("📅 Interview Scheduler Tool")
 
 st.markdown("""
-This app expects a single CSV with headers:
+This app expects a CSV with headers:
 
-**Type, Email, Name, Title, StartTime, EndTime**
+**Interviewer, Name, Title, StartTime, EndTime**
 
-- People rows: `Type=Person`, `Email` = interviewer email, `Name`, `Title`
-- Room rows:   `Type=Room`,   `Email` = room mailbox,   `Name` = room name, `Title` blank
-
-**Flow:** Upload → set durations → Generate Agendas → click “Prepare invitations” beside an option.
+- Interviewer = email address used for the invite
+- Name/Title are shown in the tables and invite body
 ---
 """)
 
@@ -72,27 +70,26 @@ with st.sidebar:
 
 # ---------------- CSV upload ----------------
 uploaded_file = st.file_uploader(
-    "Upload single CSV (Type, Email, Name, Title, StartTime, EndTime)", type=["csv"]
+    "Upload CSV (Interviewer, Name, Title, StartTime, EndTime)", type=["csv"]
 )
 
 if uploaded_file:
     # --- strict schema ---
     df = pd.read_csv(uploaded_file)
     df.columns = [c.strip() for c in df.columns]
-    expected = ["Type", "Email", "Name", "Title", "StartTime", "EndTime"]
+    expected = ["Interviewer", "Name", "Title", "StartTime", "EndTime"]
     if list(df.columns) != expected:
         st.error(f"CSV headers must be exactly: {', '.join(expected)}")
         st.stop()
 
     # --- normalize & clean ---
-    df["Type"] = df["Type"].astype(str).str.strip()
-    df["Email"] = df["Email"].astype(str).str.strip()
+    df["Interviewer"] = df["Interviewer"].astype(str).str.strip()
     df["Name"]  = df["Name"].fillna("").astype(str).str.strip()
     df["Title"] = df["Title"].fillna("").astype(str).str.strip()
 
     df["StartTime"] = parse_dt(df["StartTime"])
     df["EndTime"]   = parse_dt(df["EndTime"])
-    df = df.dropna(subset=["Email", "StartTime", "EndTime"]).copy()
+    df = df.dropna(subset=["Interviewer", "StartTime", "EndTime"]).copy()
 
     fifteen = timedelta(minutes=15)
     df["StartTime"] = df["StartTime"].dt.floor("15min")
@@ -106,20 +103,16 @@ if uploaded_file:
 
     df["Date"] = df["StartTime"].dt.date
 
-    # split people vs rooms
-    people_df = df[df["Type"].str.lower() == "person"].copy()
-    rooms_df  = df[df["Type"].str.lower() == "room"].copy()
-
-    # label for display: "Name — Title" (fallback to email if missing)
-    name_map  = people_df.groupby("Email")["Name"].first().to_dict()
-    title_map = people_df.groupby("Email")["Title"].first().to_dict()
+    # display label: "Name — Title" (fallback to email if missing)
+    name_map  = df.groupby("Interviewer")["Name"].first().to_dict()
+    title_map = df.groupby("Interviewer")["Title"].first().to_dict()
     def label_for(email: str) -> str:
         nm = name_map.get(email, "")
         tt = title_map.get(email, "")
         return f"{nm} — {tt}" if nm and tt else (nm or email)
 
     # ------------- UI: durations -------------
-    interviewers = sorted(people_df["Email"].unique())
+    interviewers = sorted(df["Interviewer"].unique())
     st.subheader("Set Duration for Each Interviewer")
     cols = st.columns(min(4, len(interviewers)) or 1)
     durations = {}
@@ -133,11 +126,11 @@ if uploaded_file:
 
     max_per_day = st.slider("Maximum number of agenda options per day", 1, 10, 2)
 
-    # ------------- People helpers -------------
+    # ------------- Helpers -------------
     def build_blocks_map(day_frame):
         blocks = {}
         candidate_starts = set()
-        for person, sub in day_frame.groupby("Email"):
+        for person, sub in day_frame.groupby("Interviewer"):
             sub = sub.sort_values("StartTime")
             s = set(zip(sub["StartTime"], sub["EndTime"]))
             blocks[person] = s
@@ -187,44 +180,11 @@ if uploaded_file:
                         day_agendas_total.append(agenda)
         return day_agendas_total
 
-    def find_all_days(people_df, durations, max_per_day):
+    def find_all_days(df, durations, max_per_day):
         agendas_all = []
-        for _, day_frame in people_df.groupby("Date"):
+        for _, day_frame in df.groupby("Date"):
             agendas_all.extend(find_agendas_contiguous(day_frame, durations, max_per_day))
         return agendas_all
-
-    # ------------- Rooms helpers -------------
-    def build_room_blocks(rooms_df_day):
-        blocks = {}
-        for room, sub in rooms_df_day.groupby("Email"):
-            sub = sub.sort_values("StartTime")
-            blocks[room] = set(zip(sub["StartTime"], sub["EndTime"]))
-        return blocks
-
-    def room_has_contiguous(blocks_set, start_ts, end_ts):
-        t = start_ts
-        while t < end_ts:
-            if (t, t + fifteen) not in blocks_set:
-                return False
-            t += fifteen
-        return True
-
-    def pick_room_for_agenda(agenda):
-        """Return (room_email, room_label) that covers whole agenda window, else (None, None)."""
-        if rooms_df.empty:
-            return (None, None)
-        day = agenda[0][1].date()
-        day_rooms = rooms_df[rooms_df["Date"] == day]
-        if day_rooms.empty:
-            return (None, None)
-        start_ts = agenda[0][1]
-        end_ts   = agenda[-1][2]
-        room_blocks = build_room_blocks(day_rooms)
-        name_map_rooms = day_rooms.groupby("Email")["Name"].first().to_dict()
-        for room_email, blocks_set in room_blocks.items():
-            if room_has_contiguous(blocks_set, start_ts, end_ts):
-                return (room_email, name_map_rooms.get(room_email, room_email))
-        return (None, None)
 
     # ------------- Lunch filter -------------
     def agenda_respects_lunch_rule(agenda):
@@ -238,10 +198,10 @@ if uploaded_file:
     # ------------- Generate -------------
     if st.button("Generate Agendas"):
         if not interviewers:
-            st.error("No interviewers found (Type=Person rows).")
+            st.error("No interviewers found in the CSV.")
             st.stop()
 
-        agendas = [a for a in find_all_days(people_df, durations, max_per_day) if agenda_respects_lunch_rule(a)]
+        agendas = [a for a in find_all_days(df, durations, max_per_day) if agenda_respects_lunch_rule(a)]
 
         if not agendas:
             msg = "No valid sequential agendas found."
@@ -252,16 +212,11 @@ if uploaded_file:
             st.success(f"✅ Found {len(agendas)} possible agendas.")
 
             subject_prefix = f"Interview: {candidate_name} - {job_title}"
+            location_value = "Microsoft Teams"
 
             for idx, agenda in enumerate(agendas, start=1):
                 date_str = agenda[0][1].astimezone(USER_TZ).strftime("%A, %B %d, %Y")
-
-                # Suggest a room that covers the whole window
-                room_email, room_label = pick_room_for_agenda(agenda)
-                header = f"### Option {idx} — {date_str}"
-                if room_label:
-                    header += f"  \n*Suggested room:* **{room_label}**"
-                st.markdown(header)
+                st.markdown(f"### Option {idx} — {date_str}")
 
                 # Visible table with Name — Title
                 md = "| Interviewer (Name — Title) | Start | End |\n|---|---:|---:|\n"
@@ -290,10 +245,7 @@ if uploaded_file:
                     "<p>(If using Outlook desktop, click the <b>Teams meeting</b> button to add the Teams link.)</p>"
                 )
 
-                # Location: Teams + room if available
-                location_value = "Microsoft Teams" + (f"; Room: {room_label}" if room_label else "")
-
-                # Build compose links (one per interviewer)
+                # Build compose links (one draft per interviewer)
                 compose_links = []
                 for person, start_ts, end_ts in agenda:
                     if is_email(person):
@@ -312,7 +264,7 @@ if uploaded_file:
                     [f'<li><a href="{u}" target="_blank" rel="noopener noreferrer">{u}</a></li>' for u in compose_links]
                 ) or "<li>No links</li>"
 
-                # Real HTML button to open drafts (handles popup blockers)
+                # Button to open all drafts (handles popup blockers)
                 st.components.v1.html(
                     f"""
                     <div style="margin:8px 0 4px 0">
