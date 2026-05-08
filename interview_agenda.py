@@ -20,9 +20,10 @@ st.markdown("""
 ### Instructions
 1) Upload the CSV with columns: **Interviewer, Name, Title, StartTime, EndTime**.
 2) Set each interviewer’s duration: 15, 30, 45, or 60 minutes.
-3) Enter **Candidate Name** and **Job Title**.
-4) Click **Generate Agendas**.
-5) Use **Prepare invitations** beside an option.
+3) Optionally set a required interviewer order.
+4) Enter **Candidate Name** and **Job Title**.
+5) Click **Generate Agendas**.
+6) Use **Prepare invitations** beside an option.
 ---
 """)
 
@@ -34,24 +35,16 @@ FIFTEEN_MINUTES = timedelta(minutes=15)
 
 # ---------- Helper functions ----------
 def is_email(value: str) -> bool:
-    """Return True if the value appears to be an email address."""
     return isinstance(value, str) and EMAIL_RE.match(value.strip()) is not None
 
 
 def clean_text(value):
-    """Safely clean text values from the CSV."""
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
 def parse_time_series(series: pd.Series) -> pd.Series:
-    """
-    Safely parse a pandas Series into datetime values.
-
-    This intentionally does NOT use infer_datetime_format=True because newer
-    pandas versions used by Streamlit Cloud may reject or warn on that argument.
-    """
     cleaned = series.astype(str).str.strip()
 
     parsed = pd.to_datetime(
@@ -63,12 +56,6 @@ def parse_time_series(series: pd.Series) -> pd.Series:
 
 
 def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", location=""):
-    """
-    Create an Outlook web calendar compose deeplink.
-
-    Pass local naive datetimes, meaning timezone information should already
-    have been converted and then removed before calling this function.
-    """
     fmt = "%Y-%m-%dT%H:%M:%S"
 
     params = {
@@ -93,10 +80,6 @@ def outlook_web_link(to_email, start_dt_local, end_dt_local, subject, body="", l
 
 
 def safe_localize_or_convert(series: pd.Series, user_tz: ZoneInfo) -> pd.Series:
-    """
-    If the datetime series is timezone-naive, localize it to the selected timezone.
-    If it is already timezone-aware, convert it to the selected timezone.
-    """
     if series.dt.tz is None:
         return series.dt.tz_localize(user_tz)
 
@@ -104,7 +87,6 @@ def safe_localize_or_convert(series: pd.Series, user_tz: ZoneInfo) -> pd.Series:
 
 
 def label_for_interviewer(email: str, name_map: dict, title_map: dict) -> str:
-    """Build a display label for an interviewer."""
     name = clean_text(name_map.get(email, ""))
     title = clean_text(title_map.get(email, ""))
 
@@ -117,15 +99,118 @@ def label_for_interviewer(email: str, name_map: dict, title_map: dict) -> str:
     return email
 
 
+def build_person_lookup(interviewers, name_map, title_map):
+    """
+    Builds a lookup so users can type either:
+    - interviewer email
+    - interviewer name
+    - interviewer display label
+    """
+    lookup = {}
+
+    for email in interviewers:
+        email_clean = clean_text(email)
+        name = clean_text(name_map.get(email, ""))
+        title = clean_text(title_map.get(email, ""))
+        label = label_for_interviewer(email, name_map, title_map)
+
+        possible_keys = [
+            email_clean,
+            email_clean.lower(),
+            name,
+            name.lower(),
+            label,
+            label.lower()
+        ]
+
+        if name and title:
+            possible_keys.append(f"{name} - {title}")
+            possible_keys.append(f"{name} - {title}".lower())
+
+        for key in possible_keys:
+            if key:
+                lookup[key] = email
+
+    return lookup
+
+
+def parse_custom_order(order_text, interviewers, person_lookup):
+    """
+    Parse a user-entered custom order.
+
+    Accepts comma-separated values:
+    jane.doe@company.com, john.smith@company.com
+
+    Also accepts names if the CSV has a Name column:
+    Jane Doe, John Smith
+    """
+    if not order_text or not order_text.strip():
+        return None, None
+
+    raw_items = [item.strip() for item in order_text.split(",") if item.strip()]
+
+    if not raw_items:
+        return None, None
+
+    resolved_order = []
+    unresolved_items = []
+
+    for item in raw_items:
+        matched_person = person_lookup.get(item) or person_lookup.get(item.lower())
+
+        if matched_person:
+            resolved_order.append(matched_person)
+        else:
+            unresolved_items.append(item)
+
+    if unresolved_items:
+        return None, unresolved_items
+
+    unique_order = []
+    seen = set()
+
+    for person in resolved_order:
+        if person not in seen:
+            unique_order.append(person)
+            seen.add(person)
+
+    missing_people = [person for person in interviewers if person not in unique_order]
+
+    final_order = unique_order + missing_people
+
+    return final_order, None
+
+
+def build_allowed_orders(interviewers, custom_order=None, first_person=None, last_person=None):
+    """
+    Determine which interviewer orders the app is allowed to test.
+
+    Priority:
+    1) If custom_order is provided, use that exact order.
+    2) Otherwise, generate permutations.
+    3) Apply first_person and/or last_person filters if selected.
+    """
+    if custom_order:
+        return [tuple(custom_order)]
+
+    possible_orders = list(permutations(interviewers))
+
+    if first_person and first_person != "No preference":
+        possible_orders = [
+            order for order in possible_orders
+            if order[0] == first_person
+        ]
+
+    if last_person and last_person != "No preference":
+        possible_orders = [
+            order for order in possible_orders
+            if order[-1] == last_person
+        ]
+
+    return possible_orders
+
+
 def build_blocks_map(day_frame: pd.DataFrame):
-    """
-    Build a map of interviewer availability blocks.
-
-    Each available block is stored as:
-    (StartTime, EndTime)
-
-    Also returns all possible candidate start times.
-    """
     blocks = {}
     candidate_starts = set()
 
@@ -141,10 +226,6 @@ def build_blocks_map(day_frame: pd.DataFrame):
 
 
 def has_contiguous_availability(block_set, start_ts, minutes):
-    """
-    Confirm whether a person has enough contiguous 15-minute blocks
-    starting at start_ts to cover the required duration.
-    """
     steps = minutes // 15
     current = start_ts
 
@@ -159,13 +240,12 @@ def has_contiguous_availability(block_set, start_ts, minutes):
     return True
 
 
-def find_agendas_contiguous(df_day: pd.DataFrame, durations: dict, max_per_day: int):
-    """
-    Find valid sequential agendas for one day.
-
-    The function tries different interviewer orders and checks whether each
-    interviewer has contiguous availability immediately after the prior interview.
-    """
+def find_agendas_contiguous(
+    df_day: pd.DataFrame,
+    durations: dict,
+    max_per_day: int,
+    allowed_orders
+):
     day_agendas_total = []
     blocks_map, candidate_starts = build_blocks_map(df_day)
 
@@ -175,7 +255,7 @@ def find_agendas_contiguous(df_day: pd.DataFrame, durations: dict, max_per_day: 
 
     seen_keys = set()
 
-    for order in permutations(durations.keys()):
+    for order in allowed_orders:
         if len(day_agendas_total) >= max_per_day:
             break
 
@@ -220,27 +300,23 @@ def find_agendas_contiguous(df_day: pd.DataFrame, durations: dict, max_per_day: 
     return day_agendas_total
 
 
-def find_all_days(df: pd.DataFrame, durations: dict, max_per_day: int):
-    """Find valid agendas across all available dates."""
+def find_all_days(df: pd.DataFrame, durations: dict, max_per_day: int, allowed_orders):
     agendas_all = []
 
     for _, day_frame in df.groupby("Date"):
         agendas_all.extend(
-            find_agendas_contiguous(day_frame, durations, max_per_day)
+            find_agendas_contiguous(
+                day_frame,
+                durations,
+                max_per_day,
+                allowed_orders
+            )
         )
 
     return agendas_all
 
 
 def agenda_respects_lunch_rule(agenda, avoid_lunch: bool, user_tz: ZoneInfo):
-    """
-    Apply the lunch rule.
-
-    Current rule:
-    If avoid lunch is enabled, the agenda must either:
-    - end by 12:30 PM, or
-    - start at or after 12:30 PM
-    """
     if not avoid_lunch:
         return True
 
@@ -351,7 +427,6 @@ if uploaded_file:
     df["StartTime"] = df["StartTime"].dt.floor("15min")
     df["EndTime"] = df["EndTime"].dt.floor("15min")
 
-    # If EndTime is equal to or earlier than StartTime, assume one 15-minute block.
     df.loc[
         df["EndTime"] <= df["StartTime"],
         "EndTime"
@@ -385,14 +460,17 @@ if uploaded_file:
     with st.expander("Preview uploaded availability"):
         st.dataframe(df)
 
-    # ---------- UI: durations ----------
+    # ---------- Interviewers ----------
     interviewers = sorted(df["Interviewer"].unique())
-
-    st.subheader("Set Duration for Each Interviewer")
 
     if not interviewers:
         st.error("No interviewers found in the CSV.")
         st.stop()
+
+    person_lookup = build_person_lookup(interviewers, name_map, title_map)
+
+    # ---------- UI: durations ----------
+    st.subheader("Set Duration for Each Interviewer")
 
     cols = st.columns(min(4, len(interviewers)) or 1)
 
@@ -413,9 +491,105 @@ if uploaded_file:
         value=2
     )
 
+    # ---------- UI: interviewer order ----------
+    st.subheader("Optional Interviewer Order Rules")
+
+    interviewer_display_options = ["No preference"] + [
+        label_for(person) for person in interviewers
+    ]
+
+    display_to_email = {
+        label_for(person): person
+        for person in interviewers
+    }
+
+    order_cols = st.columns(2)
+
+    first_choice_display = order_cols[0].selectbox(
+        "Force this interviewer to go first",
+        interviewer_display_options,
+        index=0
+    )
+
+    last_choice_display = order_cols[1].selectbox(
+        "Force this interviewer to go last",
+        interviewer_display_options,
+        index=0
+    )
+
+    first_person = (
+        display_to_email.get(first_choice_display)
+        if first_choice_display != "No preference"
+        else "No preference"
+    )
+
+    last_person = (
+        display_to_email.get(last_choice_display)
+        if last_choice_display != "No preference"
+        else "No preference"
+    )
+
+    custom_order_text = st.text_input(
+        "Optional exact interviewer order",
+        value="",
+        placeholder="Example: Jane Smith, John Doe, Alex Brown",
+        help=(
+            "Use comma-separated names or email addresses. "
+            "If this is filled in, it overrides the first/last dropdowns."
+        )
+    )
+
+    if custom_order_text.strip():
+        st.caption(
+            "Custom order is active. The app will use this exact order first, "
+            "then append any missing interviewers at the end."
+        )
+    else:
+        st.caption(
+            "Leave custom order blank if you only want to force one person first or last."
+        )
+
     # ---------- Generate agendas ----------
     if st.button("Generate Agendas"):
-        agendas = find_all_days(df, durations, max_per_day)
+        custom_order, unresolved_items = parse_custom_order(
+            custom_order_text,
+            interviewers,
+            person_lookup
+        )
+
+        if unresolved_items:
+            st.error(
+                "The following custom order entries could not be matched to an interviewer: "
+                + ", ".join(unresolved_items)
+            )
+            st.stop()
+
+        if (
+            first_person != "No preference"
+            and last_person != "No preference"
+            and first_person == last_person
+            and not custom_order
+        ):
+            st.error("The same interviewer cannot be forced both first and last.")
+            st.stop()
+
+        allowed_orders = build_allowed_orders(
+            interviewers=interviewers,
+            custom_order=custom_order,
+            first_person=first_person,
+            last_person=last_person
+        )
+
+        if not allowed_orders:
+            st.error("No valid interviewer order could be generated from the selected rules.")
+            st.stop()
+
+        agendas = find_all_days(
+            df,
+            durations,
+            max_per_day,
+            allowed_orders
+        )
 
         agendas = [
             agenda
@@ -426,8 +600,14 @@ if uploaded_file:
         if not agendas:
             message = "No valid sequential agendas found."
 
+            if custom_order:
+                message += " The custom order may not fit the available time blocks."
+
+            elif first_person != "No preference" or last_person != "No preference":
+                message += " The first/last interviewer rule may be too restrictive."
+
             if avoid_lunch:
-                message += " Try turning off the lunch filter or adjust durations."
+                message += " You can also try turning off the lunch filter or adjusting durations."
 
             st.error(message)
             st.stop()
@@ -444,7 +624,6 @@ if uploaded_file:
 
             st.markdown(f"### Option {idx}: {date_str}")
 
-            # ---------- Visible agenda table ----------
             visible_rows = []
 
             for person, start_ts, end_ts in agenda:
@@ -458,7 +637,6 @@ if uploaded_file:
 
             st.table(pd.DataFrame(visible_rows))
 
-            # ---------- HTML agenda for Outlook body ----------
             rows_html = ""
 
             for person, start_ts, end_ts in agenda:
@@ -481,7 +659,6 @@ if uploaded_file:
                 "button to add the Teams link.</p>"
             )
 
-            # ---------- Outlook compose links ----------
             compose_links = []
 
             for person, start_ts, end_ts in agenda:
@@ -522,7 +699,6 @@ if uploaded_file:
             if not links_html:
                 links_html = "<li>No invitation links were created because no interviewer values were valid email addresses.</li>"
 
-            # ---------- Invitation button ----------
             st.components.v1.html(
                 f"""
                 <div style="margin:8px 0 4px 0">
